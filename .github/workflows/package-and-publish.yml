@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
   push:
     branches:
-      - main  # твоя основная ветка
+      - main  # Основная ветка репозитория
 
 permissions:
   contents: write
@@ -15,8 +15,6 @@ concurrency:
 
 env:
   APP_NAME: MyTonWallet
-  PROXY_HOSTS: ${{ vars.PROXY_HOSTS }}
-  STAKING_POOLS: ${{ vars.STAKING_POOLS }}
   PUBLISH_REPO: ${{ vars.PUBLISH_REPO }}
 
 jobs:
