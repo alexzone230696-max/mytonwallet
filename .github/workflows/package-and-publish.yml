@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
   push:
     branches:
-      - master
+      - main  # твоя основная ветка
 
 permissions:
   contents: write
@@ -21,16 +21,15 @@ env:
 
 jobs:
   android-release:
-    name: Release Android app
+    name: Build and release Android app
     runs-on: ubuntu-latest
     environment: production
     timeout-minutes: 30
-    if: github.event_name != 'workflow_dispatch' && github.ref == 'refs/heads/master'
     steps:
-      - name: Checkout
+      - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Prepare the Node environment
+      - name: Prepare Node.js environment
         uses: ./.github/actions/prepare_node
         with:
           node-version: ${{ vars.NODE_VERSION }}
@@ -43,14 +42,14 @@ jobs:
             npm run mobile:build:production
           fi
 
-      - name: Use Ruby and install dependencies
+      - name: Setup Ruby and install dependencies
         uses: ruby/setup-ruby@v1
         with:
           ruby-version: 3.2
           bundler-cache: true
           working-directory: mobile
 
-      - name: Set up JDK 21
+      - name: Setup JDK 21
         uses: actions/setup-java@v3
         with:
           java-version: '21'
@@ -60,22 +59,24 @@ jobs:
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
 
-      - name: Package and publish
-        env:
-          ANDROID_API_KEY_BASE64: ${{ secrets.ANDROID_API_KEY_BASE64 }}
-          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
-          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+      - name: Decode Android keys
         run: |
           cd mobile/android
           echo -n "$ANDROID_API_KEY_BASE64" | base64 --decode > ./api-key.json
           echo -n "$ANDROID_KEYSTORE_BASE64" | base64 --decode > ./android.keystore
+
+      - name: Package and publish with Fastlane
+        env:
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+        run: |
+          cd mobile/android
           if [ -z "$PUBLISH_REPO" ]; then
             bundle exec fastlane beta
           else
             bundle exec fastlane release
           fi
 
-      - name: Build project for direct apk
+      - name: Build direct APK
         env:
           IS_ANDROID_DIRECT: 1
         run: |
@@ -85,10 +86,8 @@ jobs:
             npm run mobile:build:production
           fi
 
-      - name: Build direct apk
+      - name: Fastlane direct build
         env:
-          ANDROID_API_KEY_BASE64: ${{ secrets.ANDROID_API_KEY_BASE64 }}
-          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
           ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
         run: |
           cd mobile/android
@@ -103,23 +102,20 @@ jobs:
           path: ${{ env.APP_NAME }}.apk
 
   publish-release:
-    name: Publish GitHub release
+    name: Publish GitHub Release
     runs-on: ubuntu-latest
+    needs: android-release
     environment: production
-    timeout-minutes: 30
-    needs:
-      - android-release
-    if: github.event_name != 'workflow_dispatch' && github.ref == 'refs/heads/master' && vars.PUBLISH_REPO != ''
+    timeout-minutes: 20
+    if: vars.PUBLISH_REPO != ''
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
       - name: Set environment variables
-        id: variables
         run: |
           echo "ANDROID_FILE_NAME=${{ env.APP_NAME }}.apk" >> "$GITHUB_ENV"
 
-      - name: Download Android package
-        id: download-android
+      - name: Download APK artifact
         uses: actions/download-artifact@v4
         with:
           name: ${{ env.ANDROID_FILE_NAME }}
@@ -130,17 +126,19 @@ jobs:
           RELEASE_ID=$(curl -s -H "Authorization: Bearer $GH_TOKEN" "https://api.github.com/repos/$PUBLISH_REPO/releases?per_page=1" | jq -r '.[0].id')
           echo "release_id=$RELEASE_ID" >> $GITHUB_OUTPUT
 
-      - name: Delete existing asset
+      - name: Delete existing APK asset (if exists)
         env:
           RELEASE_ID: ${{ steps.release-id.outputs.release_id }}
         run: |
           PUBLISH_FILE_NAME=${ANDROID_FILE_NAME// /-}
           ASSET_ID=$(curl -s -H "Authorization: Bearer $GH_TOKEN" "https://api.github.com/repos/$PUBLISH_REPO/releases/$RELEASE_ID/assets" | jq -r --arg PUBLISH_FILE_NAME "$PUBLISH_FILE_NAME" '.[] | select(.name == $PUBLISH_FILE_NAME) | .id')
-          curl -X DELETE -H "Authorization: Bearer $GH_TOKEN" "https://api.github.com/repos/$PUBLISH_REPO/releases/assets/$ASSET_ID"
+          if [ ! -z "$ASSET_ID" ]; then
+            curl -X DELETE -H "Authorization: Bearer $GH_TOKEN" "https://api.github.com/repos/$PUBLISH_REPO/releases/assets/$ASSET_ID"
+          fi
 
-      - name: Push new Android asset
+      - name: Upload APK to release
         env:
-          FILE_PATH: ${{ steps.download-android.outputs.download-path }}
+          FILE_PATH: ${{ steps.download-artifact.outputs.download-path }}
           RELEASE_ID: ${{ steps.release-id.outputs.release_id }}
         run: |
           FILE_NAME=$ANDROID_FILE_NAME
@@ -149,9 +147,11 @@ jobs:
             -H "Content-Type: application/octet-stream" \
             --data-binary "@$FILE_PATH/$FILE_NAME" \
             "https://uploads.github.com/repos/$PUBLISH_REPO/releases/$RELEASE_ID/assets?name=$PUBLISH_FILE_NAME"
-      
+
       - name: Publish release
         env:
           RELEASE_ID: ${{ steps.release-id.outputs.release_id }}
         run: |
-          curl -X PATCH -H "Authorization: Bearer $GH_TOKEN" "https://api.github.com/repos/$PUBLISH_REPO/releases/$RELEASE_ID" -d '{"draft": false}'
+          curl -X PATCH -H "Authorization: Bearer $GH_TOKEN" \
+            "https://api.github.com/repos/$PUBLISH_REPO/releases/$RELEASE_ID" \
+            -d '{"draft": false}'
